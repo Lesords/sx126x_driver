@@ -1,10 +1,10 @@
-/*!
- * @file      sx126x_driver_version.h
+/**
+ * @file      sx126x_status.h
  *
- * @brief     Placeholder to keep the version of SX126X driver.
+ * @brief     SX126x status radio driver definition
  *
  * The Clear BSD License
- * Copyright Semtech Corporation 2023. All rights reserved.
+ * Copyright Semtech Corporation 2025. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the disclaimer
@@ -32,8 +32,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef SX126X_DRIVER_VERSION_H
-#define SX126X_DRIVER_VERSION_H
+#ifndef SX126X_STATUS_H
+#define SX126X_STATUS_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,32 +54,31 @@ extern "C" {
  * --- PUBLIC CONSTANTS --------------------------------------------------------
  */
 
-/**
- * @brief Value of driver version string
- */
-#define SX126X_DRIVER_VERSION "v2.5.0"
-
 /*
  * -----------------------------------------------------------------------------
  * --- PUBLIC TYPES ------------------------------------------------------------
  */
+
+/**
+ * @brief SX126X APIs return status enumeration definition
+ */
+typedef enum sx126x_status_e
+{
+    SX126X_STATUS_OK = 0,
+    SX126X_STATUS_UNSUPPORTED_FEATURE,
+    SX126X_STATUS_UNKNOWN_VALUE,
+    SX126X_STATUS_ERROR,
+} sx126x_status_t;
 
 /*
  * -----------------------------------------------------------------------------
  * --- PUBLIC FUNCTIONS PROTOTYPES ---------------------------------------------
  */
 
-/**
- * @brief Get version of driver as string
- *
- * @return String describing driver version
- */
-const char* sx126x_driver_version_get_version_string( void );
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // SX126X_DRIVER_VERSION_H
+#endif  // SX126X_STATUS_H
 
 /* --- EOF ------------------------------------------------------------------ */
