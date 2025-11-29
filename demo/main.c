@@ -13,7 +13,8 @@
 #define GPIO_DIO1    606   // Set to your DIO1 GPIO number (e.g., 547). Set -1 if not used (polling SPI).
 // ---------------------
 
-#define RF_FREQUENCY 868000000 // 868 MHz
+#define RF_FREQUENCY 470000000 // 470 MHz (Common in China)
+//#define RF_FREQUENCY 868000000 // 868 MHz
 #define TX_OUTPUT_POWER 14     // dBm
 
 sx126x_hal_context_t hal_ctx = {
@@ -45,43 +46,42 @@ int main() {
     printf("Resetting radio...\n");
     sx126x_reset(&hal_ctx);
     
-    // --- NEW: Check SPI Connection ---
-    // Try to read the status. If SPI is broken, we usually get 0x00 or 0xFF.
+    // --- DIAGNOSTICS: Read Chip Info ---
     sx126x_chip_status_t chip_status;
     sx126x_get_status(&hal_ctx, &chip_status);
     printf("Chip Status: CmdStatus=%d, ChipMode=%d\n", chip_status.cmd_status, chip_status.chip_mode);
     
     if (chip_status.chip_mode == 0 || chip_status.chip_mode == 0xFF) {
         printf("ERROR: SPI Read failed (read 0x00 or 0xFF). Check wiring (MISO)!\n");
-        // return 1; // You can uncomment this to stop on error
+        return 1;
     }
-    // ---------------------------------
 
-    // 3. Set Standby
+    // Set Standby first to allow reading registers safely
     check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC), "Set Standby");
-    printf("Radio in Standby.\n");
 
-    // --- 关键配置：TCXO 和 RF Switch ---
-    // 很多模块（如 EByte, NiceRF）需要配置 DIO3 为 TCXO 供电，DIO2 为 RF 开关控制
-    // 如果不配置，晶振可能不工作，或者天线没切过来
-    
-    // 3.1 配置 TCXO (电压 1.7V, 延时 320*15.625us ≈ 5ms)
-    // 如果你的模块没有 TCXO，这句通常也没副作用，但如果有 TCXO 却不配，就完全不工作
-    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 320), "Set TCXO");
-
-    // 3.2 配置 DIO2 控制 RF Switch
-    // 告诉芯片：发送时自动拉高 DIO2，接收时拉低（或反之，芯片内部自动处理）
-    check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
-    // ----------------------------------
-
-    // --- NEW: Configure TCXO & DIO2 (Crucial for many modules) ---
+    // --- 1. 优先配置 TCXO (解决起振失败问题) ---
     // Configure DIO3 as TCXO control (Voltage: 1.7V, Timeout: 5ms)
-    // If your module uses XTAL, this might not be needed, but it's safe for most TCXO modules.
-    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 320), "Set TCXO"); // 320 * 15.625us ~= 5ms
+    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 320), "Set TCXO");
 
     // Configure DIO2 as RF Switch control
     check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
-    // -------------------------------------------------------------
+    
+    // --- 2. 清除启动时的瞬态错误 ---
+    sx126x_clear_device_errors(&hal_ctx);
+    // ----------------------------------
+
+    // --- 3. 现在检查错误 (应该是 0x0000) ---
+    sx126x_errors_mask_t device_errors;
+    sx126x_get_device_errors(&hal_ctx, &device_errors);
+    printf("Device Errors: 0x%04X\n", device_errors);
+    if (device_errors & SX126X_ERRORS_RC64K_CALIBRATION) printf("  - RC64K Calibration Failed\n");
+    if (device_errors & SX126X_ERRORS_RC13M_CALIBRATION) printf("  - RC13M Calibration Failed\n");
+    if (device_errors & SX126X_ERRORS_PLL_CALIBRATION)   printf("  - PLL Calibration Failed\n");
+    if (device_errors & SX126X_ERRORS_ADC_CALIBRATION)   printf("  - ADC Calibration Failed\n");
+    if (device_errors & SX126X_ERRORS_IMG_CALIBRATION)   printf("  - Image Calibration Failed\n");
+    if (device_errors & SX126X_ERRORS_XOSC_START)  printf("  - XOSC Failed to Start\n");
+    if (device_errors & SX126X_ERRORS_PLL_LOCK)    printf("  - PLL Lock Failed\n");
+    if (device_errors & SX126X_ERRORS_PA_RAMP)     printf("  - PA Ramp Failed\n");
 
     // 4. Set Packet Type
     check_status(sx126x_set_pkt_type(&hal_ctx, SX126X_PKT_TYPE_LORA), "Set Packet Type");
@@ -131,6 +131,14 @@ int main() {
 
     // 12. Start RX (Continuous)
     printf("Starting RX (Continuous)...\n");
+    
+    // Check for errors one last time before starting
+    sx126x_get_device_errors(&hal_ctx, &device_errors);
+    if (device_errors != 0) {
+        printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
+        sx126x_clear_device_errors(&hal_ctx);
+    }
+
     // SX126X_RX_CONTINUOUS is 0xFFFFFF
     // Note: sx126x_set_rx takes timeout in ms.
     // If we pass 0xFFFFFF, it's a huge timeout (hours).
@@ -143,8 +151,18 @@ int main() {
     printf("Waiting for packets...\n");
     uint16_t irq_status = 0;
     sx126x_pkt_status_lora_t pkt_status;
+    sx126x_chip_status_t loop_status;
+    int loop_cnt = 0;
 
     while (1) {
+        // Every 1 second, print chip status to ensure it's still in RX mode
+        if (loop_cnt++ % 100 == 0) {
+            sx126x_get_status(&hal_ctx, &loop_status);
+            // Mode 5 = RX, Mode 2 = STDBY_RC, Mode 3 = STDBY_XOSC
+            printf("[Status Monitor] Mode: %d (Should be 5/RX), CmdStatus: %d\n", 
+                   loop_status.chip_mode, loop_status.cmd_status);
+        }
+
         sx126x_get_irq_status(&hal_ctx, &irq_status);
         
         if (irq_status & SX126X_IRQ_RX_DONE) {
