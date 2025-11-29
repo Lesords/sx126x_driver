@@ -39,6 +39,7 @@ project(
 )
 
 add_subdirectory(src)
+add_subdirectory(demo)
 
 install(EXPORT Sx126xDriverTargets
     FILE Sx126xDriverConfig.cmake

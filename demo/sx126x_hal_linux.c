@@ -1,0 +1,224 @@
+#include "sx126x_hal.h"
+#include "sx126x_hal_linux.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
+#include <linux/types.h>
+#include <time.h>
+#include <errno.h>
+
+#define SPI_SPEED_HZ 100000 // 100 kHz for debugging
+
+// Helper to export and configure GPIO
+static int gpio_export(int gpio) {
+    char buffer[64];
+    int fd = open("/sys/class/gpio/export", O_WRONLY);
+    if (fd < 0) return -1;
+    int len = snprintf(buffer, sizeof(buffer), "%d", gpio);
+    write(fd, buffer, len);
+    close(fd);
+    return 0;
+}
+
+static int gpio_direction(int gpio, int dir) { // 0: in, 1: out
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "/sys/class/gpio/gpio%d/direction", gpio);
+    int fd = open(buffer, O_WRONLY);
+    if (fd < 0) return -1;
+    if (dir) write(fd, "out", 3);
+    else write(fd, "in", 2);
+    close(fd);
+    return 0;
+}
+
+static int gpio_set_value(int gpio, int value) {
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "/sys/class/gpio/gpio%d/value", gpio);
+    int fd = open(buffer, O_WRONLY);
+    if (fd < 0) return -1;
+    if (value) write(fd, "1", 1);
+    else write(fd, "0", 1);
+    close(fd);
+    return 0;
+}
+
+static int gpio_get_value(int gpio) {
+    char buffer[64];
+    char value_str[3];
+    snprintf(buffer, sizeof(buffer), "/sys/class/gpio/gpio%d/value", gpio);
+    int fd = open(buffer, O_RDONLY);
+    if (fd < 0) return -1;
+    read(fd, value_str, 3);
+    close(fd);
+    return atoi(value_str);
+}
+
+int sx126x_hal_linux_init(sx126x_hal_context_t *ctx) {
+    // Open SPI
+    ctx->spi_fd = open(ctx->spidev_path, O_RDWR);
+    if (ctx->spi_fd < 0) {
+        perror("Failed to open SPI device");
+        return -1;
+    }
+
+    // Configure SPI
+    uint8_t mode = SPI_MODE_0;
+    uint8_t bits = 8;
+    uint32_t speed = SPI_SPEED_HZ;
+
+    if (ioctl(ctx->spi_fd, SPI_IOC_WR_MODE, &mode) < 0) {
+        perror("Failed to set SPI mode");
+        return -1;
+    }
+    if (ioctl(ctx->spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
+        perror("Failed to set SPI bits");
+        return -1;
+    }
+    if (ioctl(ctx->spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
+        perror("Failed to set SPI speed");
+        return -1;
+    }
+
+    // Configure GPIOs
+    gpio_export(ctx->reset_gpio);
+    gpio_direction(ctx->reset_gpio, 1); // Output
+    
+    gpio_export(ctx->busy_gpio);
+    gpio_direction(ctx->busy_gpio, 0); // Input
+
+    if (ctx->dio1_gpio >= 0) {
+        gpio_export(ctx->dio1_gpio);
+        gpio_direction(ctx->dio1_gpio, 0); // Input
+    }
+
+    return 0;
+}
+
+void sx126x_hal_linux_cleanup(sx126x_hal_context_t *ctx) {
+    if (ctx->spi_fd >= 0) close(ctx->spi_fd);
+    // Unexport GPIOs if needed, but usually fine to leave them
+}
+
+static void sx126x_hal_wait_on_busy( const void* context ) {
+    const sx126x_hal_context_t* ctx = ( const sx126x_hal_context_t* ) context;
+    
+    // Wait for BUSY to go low
+    // Simple polling with timeout
+    int timeout = 1000; // 1s timeout roughly
+    int busy_val = gpio_get_value(ctx->busy_gpio);
+    
+    if (busy_val == 1) {
+        // printf("HAL: BUSY is High, waiting...\n");
+        while (busy_val == 1 && timeout > 0) {
+            usleep(1000); // 1ms
+            timeout--;
+            busy_val = gpio_get_value(ctx->busy_gpio);
+        }
+        if (timeout == 0) {
+            printf("HAL: BUSY Timeout! GPIO %d stuck High?\n", ctx->busy_gpio);
+        }
+    }
+}
+
+sx126x_hal_status_t sx126x_hal_write( const void* context, const uint8_t* command, const uint16_t command_length,
+                                      const uint8_t* data, const uint16_t data_length ) {
+    const sx126x_hal_context_t* ctx = ( const sx126x_hal_context_t* ) context;
+    
+    sx126x_hal_wait_on_busy(context);
+
+    struct spi_ioc_transfer tr[2];
+    memset(tr, 0, sizeof(tr));
+
+    tr[0].tx_buf = (unsigned long)command;
+    tr[0].len = command_length;
+    tr[0].speed_hz = SPI_SPEED_HZ;
+    tr[0].bits_per_word = 8;
+    // If there is data, we keep CS low. If not, we deselect.
+    // However, spidev usually deselects after the whole ioctl message unless cs_change is set appropriately.
+    // We want CS to stay low between command and data.
+    // By default, spidev asserts CS for the duration of the ioctl (all transfers).
+    // So we just need to put them in one ioctl.
+
+    int num_transfers = 1;
+
+    if (data_length > 0) {
+        tr[1].tx_buf = (unsigned long)data;
+        tr[1].len = data_length;
+        tr[1].speed_hz = SPI_SPEED_HZ;
+        tr[1].bits_per_word = 8;
+        num_transfers = 2;
+    }
+
+    if (ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(num_transfers), tr) < 0) {
+        perror("SPI write failed");
+        return SX126X_HAL_STATUS_ERROR;
+    }
+
+    return SX126X_HAL_STATUS_OK;
+}
+
+sx126x_hal_status_t sx126x_hal_read( const void* context, const uint8_t* command, const uint16_t command_length,
+                                     uint8_t* data, const uint16_t data_length ) {
+    const sx126x_hal_context_t* ctx = ( const sx126x_hal_context_t* ) context;
+
+    sx126x_hal_wait_on_busy(context);
+
+    struct spi_ioc_transfer tr[2];
+    memset(tr, 0, sizeof(tr));
+
+    // Send command
+    tr[0].tx_buf = (unsigned long)command;
+    tr[0].len = command_length;
+    tr[0].speed_hz = SPI_SPEED_HZ;
+    tr[0].bits_per_word = 8;
+
+    // Receive data
+    // Note: SX126x usually requires sending NOPs while reading?
+    // The HAL definition says "command" then "data" (received).
+    // The SPI transaction is: CS Low -> Command -> Read Data -> CS High.
+    // During Read Data phase, MOSI is usually ignored or NOP (0x00).
+    
+    if (data_length > 0) {
+        tr[1].rx_buf = (unsigned long)data;
+        tr[1].len = data_length;
+        tr[1].speed_hz = SPI_SPEED_HZ;
+        tr[1].bits_per_word = 8;
+        // We don't set tx_buf, so it sends 0s (NOPs) usually, or we should explicitly send NOPs?
+        // spidev sends 0 if tx_buf is NULL.
+    }
+
+    if (ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(data_length > 0 ? 2 : 1), tr) < 0) {
+        perror("SPI read failed");
+        return SX126X_HAL_STATUS_ERROR;
+    }
+
+    return SX126X_HAL_STATUS_OK;
+}
+
+sx126x_hal_status_t sx126x_hal_reset( const void* context ) {
+    const sx126x_hal_context_t* ctx = ( const sx126x_hal_context_t* ) context;
+    
+    printf("HAL: Asserting Reset (GPIO %d)...\n", ctx->reset_gpio);
+    gpio_set_value(ctx->reset_gpio, 0);
+    usleep(20000); // 20ms
+    gpio_set_value(ctx->reset_gpio, 1);
+    printf("HAL: Released Reset. Waiting 100ms for boot...\n");
+    usleep(100000); // 100ms wait to ensure chip is ready even if BUSY pin is wrong
+    
+    return SX126X_HAL_STATUS_OK;
+}
+
+sx126x_hal_status_t sx126x_hal_wakeup( const void* context ) {
+    const sx126x_hal_context_t* ctx = ( const sx126x_hal_context_t* ) context;
+    
+    // To wakeup, we can just perform a GetStatus command or simply toggle CS.
+    // Here we send a GetStatus command (0xC0) with 0 length data.
+    uint8_t cmd = 0xC0;
+    sx126x_hal_write(context, &cmd, 1, NULL, 0);
+    
+    return SX126X_HAL_STATUS_OK;
+}
