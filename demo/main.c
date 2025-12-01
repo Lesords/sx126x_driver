@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <string.h>
 #include "sx126x.h"
+#include "sx126x_regs.h"
 #include "sx126x_hal_linux.h"
 
 // --- CONFIGURATION ---
@@ -11,17 +12,19 @@
 #define GPIO_RESET   546  // Example GPIO number
 #define GPIO_BUSY    600  // Example GPIO number
 #define GPIO_DIO1    606   // Set to your DIO1 GPIO number (e.g., 547). Set -1 if not used (polling SPI).
+#define GPIO_RF_SW   553   // NEW: RF Switch GPIO
 // ---------------------
 
-#define RF_FREQUENCY 470000000 // 470 MHz (Common in China)
+#define RF_FREQUENCY 915000000 // 915 MHz (For Wio-SX1262 High Band)
 //#define RF_FREQUENCY 868000000 // 868 MHz
-#define TX_OUTPUT_POWER 14     // dBm
+#define TX_OUTPUT_POWER 22     // dBm (Max Power for SX1262)
 
 sx126x_hal_context_t hal_ctx = {
     .spidev_path = SPI_DEV_PATH,
     .reset_gpio = GPIO_RESET,
     .busy_gpio = GPIO_BUSY,
     .dio1_gpio = GPIO_DIO1,
+    .rf_sw_gpio = GPIO_RF_SW,
     .spi_fd = -1
 };
 
@@ -67,14 +70,30 @@ int main() {
     check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC), "Set Standby");
 
     // --- 1. 优先配置 TCXO (解决起振失败问题) ---
-    // Configure DIO3 as TCXO control (Voltage: 1.7V, Timeout: 5ms)
-    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 320), "Set TCXO");
+    // Configure DIO3 as TCXO control (Voltage: 1.7V, Timeout: 20ms)
+    // 增加超时时间：320 -> 1280 (20ms)，确保 TCXO 有足够时间稳定
+    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 1280), "Set TCXO");
+    
+    // 显式设置为 DCDC 模式 (Wio-SX1262 通常支持 DCDC)
+    check_status(sx126x_set_reg_mode(&hal_ctx, SX126X_REG_MODE_DCDC), "Set Regulator DCDC");
+
+    // Calibrate Image (Important for Frequency Setting)
+    // For 915MHz (Band 902-928), we use freq 902 & 928
+    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
 
     // Configure DIO2 as RF Switch control
     check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
     
-    // --- 2. 清除启动时的瞬态错误 ---
+    // --- 2. 强制切换到 XOSC 模式以验证时钟 ---
+    // 这会立即尝试启动 TCXO。如果失败，Device Errors 会置位。
+    check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_XOSC), "Set Standby XOSC");
+    
+    // --- 3. 清除启动时的瞬态错误 ---
     sx126x_clear_device_errors(&hal_ctx);
+    
+    // --- Calibrate Image (Important for Frequency Setting) ---
+    // For 915MHz (Band 902-928), we use freq 902 & 928
+    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
     // ----------------------------------
 
     // --- 3. 现在检查错误 (应该是 0x0000) ---
@@ -124,14 +143,14 @@ int main() {
     
     check_status(sx126x_set_lora_mod_params(&hal_ctx, &mod_params), "Set Modulation Params");
 
-        // --- PHASE 1: TX (Send 3 packets) ---
-    printf("--- PHASE 1: Sending 3 Packets ---\n");
+        // --- PHASE 1: TX (Send 100 packets rapidly for Spectrum Analyzer) ---
+    printf("--- PHASE 1: Sending 100 Packets (Rapid Fire) ---\n");
     
     // TX Configuration
     sx126x_pkt_params_lora_t tx_pkt_params;
-    tx_pkt_params.preamble_len_in_symb = 8;
+    tx_pkt_params.preamble_len_in_symb = 12; // Longer preamble
     tx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-    tx_pkt_params.pld_len_in_bytes = 20; 
+    tx_pkt_params.pld_len_in_bytes = 64; // Longer payload for visibility
     tx_pkt_params.crc_is_on = true;      
     tx_pkt_params.invert_iq_is_on = false; // Standard IQ for Uplink
     check_status(sx126x_set_lora_pkt_params(&hal_ctx, &tx_pkt_params), "Set TX Packet Params");
@@ -139,20 +158,72 @@ int main() {
     // Set Sync Word (Public)
     check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
 
-    // Set Frequency
-    check_status(sx126x_set_rf_freq(&hal_ctx, 470000000), "Set RF Frequency");
+    // --- DIAGNOSTIC: Read back Sync Word ---
+    uint8_t sync_word_buff[2] = {0};
+    sx126x_read_register(&hal_ctx, SX126X_REG_LR_SYNCWORD, sync_word_buff, 2);
+    uint16_t sync_word_val = (sync_word_buff[0] << 8) | sync_word_buff[1];
+    printf(">>> SYNC WORD CHECK: Wrote 0x3444 (Public), Read 0x%04X <<<\n", sync_word_val);
+    // ---------------------------------------
+
+    // Set Frequency (Ensure it's 915MHz)
+    printf("Setting Frequency to 915MHz via Command...\n");
+    check_status(sx126x_set_rf_freq(&hal_ctx, 915000000), "Set RF Frequency (915MHz)");
+    
+    // Check Status immediately
+    sx126x_get_status(&hal_ctx, &chip_status);
+    printf("Status after SetFreq: CmdStatus=%d\n", chip_status.cmd_status);
+
+    // --- VERIFY FREQUENCY ---
+    // 1. Calculate Register Value for 915MHz
+    // Freq = Reg * 32MHz / 2^25
+    // Reg = 915000000 * 2^25 / 32000000 = 959447040 = 0x39300000
+    uint32_t target_freq_reg = 0x39300000; 
+    uint8_t freq_buff[4];
+    freq_buff[0] = (target_freq_reg >> 24) & 0xFF;
+    freq_buff[1] = (target_freq_reg >> 16) & 0xFF;
+    freq_buff[2] = (target_freq_reg >> 8) & 0xFF;
+    freq_buff[3] = (target_freq_reg >> 0) & 0xFF;
+
+    // 2. Force Write to Register 0x0860 (To ensure it's readable)
+    sx126x_write_register(&hal_ctx, 0x0860, freq_buff, 4);
+
+    // 3. Read Back
+    uint8_t freq_reg[4] = {0};
+    sx126x_read_register(&hal_ctx, 0x0860, freq_reg, 4);
+    uint32_t freq_reg_val = (freq_reg[0] << 24) | (freq_reg[1] << 16) | (freq_reg[2] << 8) | freq_reg[3];
+    double freq_hz = (double)freq_reg_val * 32000000.0 / 33554432.0;
+    
+    printf(">>> FREQUENCY CHECK: Register 0x0860 = 0x%08X, Calculated = %.2f Hz <<<\n", freq_reg_val, freq_hz);
+    printf(">>> TARGET FREQUENCY: %d Hz <<<\n", 915000000);
+    
+    if (freq_reg_val == 0) {
+         printf("WARNING: Register readback failed. Ignoring if TX DONE works.\n");
+    }
+    // ------------------------
 
     // Set IRQ for TX
     check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
                                            SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
                                            SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
 
-    for (int i = 1; i <= 3; i++) {
-        printf("Sending Packet %d/3... ", i);
+    printf("--- PHASE 1: Sending 100 Packets (Rapid Fire) ---\n");
+    printf("Note: Toggling RF_SW (GPIO %d) every 20 packets to test switch logic.\n", hal_ctx.rf_sw_gpio);
+
+    for (int i = 1; i <= 100; i++) {
+        // Toggle RF_SW every 20 packets for testing
+        if (i % 40 == 1) {
+            printf(">>> RF_SW (GPIO %d) set to HIGH (Default) <<<\n", hal_ctx.rf_sw_gpio);
+            gpio_set_value(hal_ctx.rf_sw_gpio, 1);
+        } else if (i % 40 == 21) {
+            printf(">>> RF_SW (GPIO %d) set to LOW (Testing Inverted Logic) <<<\n", hal_ctx.rf_sw_gpio);
+            gpio_set_value(hal_ctx.rf_sw_gpio, 0);
+        }
+
+        printf("Sending Packet %d/100... ", i);
         
-        uint8_t tx_buffer[20];
-        memset(tx_buffer, 0, sizeof(tx_buffer));
-        snprintf((char*)tx_buffer, sizeof(tx_buffer), "Ping %d", i);
+        uint8_t tx_buffer[64];
+        memset(tx_buffer, 0xAA, sizeof(tx_buffer)); // Fill with pattern
+        snprintf((char*)tx_buffer, sizeof(tx_buffer), "Ping %d - Wio-SX1262 Test Packet for Spectrum Analyzer...", i);
         
         sx126x_write_buffer(&hal_ctx, 0x00, tx_buffer, sizeof(tx_buffer));
         sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
@@ -173,12 +244,14 @@ int main() {
                 printf("TX TIMEOUT!\n");
                 break;
             }
-            usleep(10000); 
+            usleep(5000); // 5ms check
         }
         if (!tx_done) printf("Wait timeout\n");
-        sleep(1);
+        
+        // Short delay to keep duty cycle high for visibility
+        usleep(50000); // 50ms delay
     }
-
+    
     // --- PHASE 2: RX (Continuous) ---
     printf("\n--- PHASE 2: Entering RX Mode ---\n");
 

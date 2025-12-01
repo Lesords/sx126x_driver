@@ -35,7 +35,7 @@ static int gpio_direction(int gpio, int dir) { // 0: in, 1: out
     return 0;
 }
 
-static int gpio_set_value(int gpio, int value) {
+int gpio_set_value(int gpio, int value) {
     char buffer[64];
     snprintf(buffer, sizeof(buffer), "/sys/class/gpio/gpio%d/value", gpio);
     int fd = open(buffer, O_WRONLY);
@@ -93,6 +93,12 @@ int sx126x_hal_linux_init(sx126x_hal_context_t *ctx) {
     if (ctx->dio1_gpio >= 0) {
         gpio_export(ctx->dio1_gpio);
         gpio_direction(ctx->dio1_gpio, 0); // Input
+    }
+
+    if (ctx->rf_sw_gpio >= 0) {
+        gpio_export(ctx->rf_sw_gpio);
+        gpio_direction(ctx->rf_sw_gpio, 1); // Output
+        gpio_set_value(ctx->rf_sw_gpio, 1); // Default High (Enable?)
     }
 
     return 0;
