@@ -266,9 +266,9 @@ int main() {
     sx126x_pkt_params_lora_t rx_pkt_params;
     rx_pkt_params.preamble_len_in_symb = 8;
     rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-    rx_pkt_params.pld_len_in_bytes = 255; // Max length for RX
+    rx_pkt_params.pld_len_in_bytes = 64; // Max length for RX
     rx_pkt_params.crc_is_on = false;      // Don't enforce CRC check for now
-    rx_pkt_params.invert_iq_is_on = true; // Listen for Downlink (Inverted IQ)
+    rx_pkt_params.invert_iq_is_on = false; // Listen for Downlink (Inverted IQ)
     check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
 
     // Set IRQ for RX
@@ -276,26 +276,52 @@ int main() {
                                            SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT,
                                            SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
 
-    // Start RX
-    sx126x_set_rx(&hal_ctx, 0); // Continuous
+    // --- NEW: Set Sync Word back to Public (0x34) ---
+    // Most Gateways use Public Network.
+    check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
 
+    // Check for errors one last time before starting
+    sx126x_get_device_errors(&hal_ctx, &device_errors);
+    if (device_errors != 0) {
+        printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
+        sx126x_clear_device_errors(&hal_ctx);
+    }
+
+    // Set initial frequency
+    // 902300000
+    int freq = RF_FREQUENCY;
+    sx126x_set_rf_freq(&hal_ctx, freq);
+    sx126x_set_rx(&hal_ctx, 0);
+
+    // Start RX
+    // SX126X_RX_CONTINUOUS is 0xFFFFFF
+    // Note: sx126x_set_rx takes timeout in ms.
+    // If we pass 0xFFFFFF, it's a huge timeout (hours).
+    // If we pass 0, it's Single mode without timeout (wait forever).
+    // To be safe for continuous RX, we should use a large value or 0 if we restart manually.
+    // Let's try 0 (Single mode, wait forever) and restart in loop.
+    check_status(sx126x_set_rx(&hal_ctx, 0), "Set RX"); 
+
+    // Stop Rx
+    // sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC);
+
+    int loop_cnt = 0;
     while (1) {
         // Monitor RSSI
         int16_t rssi_inst = 0;
         sx126x_get_rssi_inst(&hal_ctx, &rssi_inst);
-        
-        static int loop_cnt = 0;
-        loop_cnt++;
-        if (rssi_inst > -110 || loop_cnt % 100 == 0) {
-             printf("[RX Monitor] RSSI: %d dBm\n", rssi_inst);
-        }
+
+        // Get RSSI/SNR
+        sx126x_pkt_status_lora_t pkt_status;
+        sx126x_get_lora_pkt_status(&hal_ctx, &pkt_status);
 
         uint16_t irq_status = 0;
         sx126x_get_irq_status(&hal_ctx, &irq_status);
         
         if (irq_status & SX126X_IRQ_RX_DONE) {
             printf("\nPacket Received!\n");
-            
+
+            // Get payload length and pointer
             sx126x_rx_buffer_status_t rx_status;
             sx126x_get_rx_buffer_status(&hal_ctx, &rx_status);
             printf("Length: %d, Start: %d\n", rx_status.pld_len_in_bytes, rx_status.buffer_start_pointer);
@@ -305,13 +331,16 @@ int main() {
             if (rx_status.pld_len_in_bytes > 0) {
                 sx126x_read_buffer(&hal_ctx, rx_status.buffer_start_pointer, buffer, rx_status.pld_len_in_bytes);
                 printf("Data: %s\n", buffer);
+            } else {
+                printf("Data: <Empty>\n");
             }
             
-            sx126x_pkt_status_lora_t pkt_status;
             sx126x_get_lora_pkt_status(&hal_ctx, &pkt_status);
-            printf("RSSI: %d dBm, SNR: %d dB\n", pkt_status.rssi_pkt_in_dbm, pkt_status.snr_pkt_in_db);
 
+            // Clear IRQ
             sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
+
+            // Restart Rx
             sx126x_set_rx(&hal_ctx, 0);
         }
         else if (irq_status & SX126X_IRQ_CRC_ERROR) {
@@ -324,124 +353,15 @@ int main() {
             sx126x_set_rx(&hal_ctx, 0);
         }
 
-        usleep(5000);
-    }
-
-
-    // --- NEW: Set Sync Word back to Public (0x34) ---
-    // Most Gateways use Public Network.
-    check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
-    // -----------------------------------------------------------
-
-    // 11. Set DIO IRQ Params (RX_DONE)
-
-    // 11. Set DIO IRQ Params (RX_DONE)
-    check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT,
-                                           SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT,
-                                           SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set DIO IRQ");
-
-    // 12. Start RX (Continuous)
-    printf("Starting RX (Continuous)...\n");
-    
-    // Check for errors one last time before starting
-    sx126x_get_device_errors(&hal_ctx, &device_errors);
-    if (device_errors != 0) {
-        printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
-        sx126x_clear_device_errors(&hal_ctx);
-    }
-
-    // SX126X_RX_CONTINUOUS is 0xFFFFFF
-    // Note: sx126x_set_rx takes timeout in ms.
-    // If we pass 0xFFFFFF, it's a huge timeout (hours).
-    // If we pass 0, it's Single mode without timeout (wait forever).
-    // To be safe for continuous RX, we should use a large value or 0 if we restart manually.
-    // Let's try 0 (Single mode, wait forever) and restart in loop.
-    check_status(sx126x_set_rx(&hal_ctx, 0), "Set RX"); 
-    // 13. Wait for RxDone
-    printf("Waiting for packets (Scanning Frequencies)...\n");
-    uint16_t irq_status = 0;
-    sx126x_pkt_status_lora_t pkt_status;
-    
-    // Frequency Scan List
-    uint32_t freqs[] = {470000000, 470200000, 470400000, 470600000, 470800000, 471000000, 475000000};
-    int freq_idx = 0;
-    int scan_timer = 0;
-
-    // Set initial frequency
-    sx126x_set_rf_freq(&hal_ctx, freqs[0]);
-    sx126x_set_rx(&hal_ctx, 0);
-    printf("Scanning Freq: %u Hz\n", freqs[0]);
-
-    while (1) {
-        // Monitor RSSI
-        int16_t rssi_inst = 0;
-        sx126x_get_rssi_inst(&hal_ctx, &rssi_inst);
-        
-        // Print RSSI
-        static int loop_cnt = 0;
         loop_cnt++;
-        if (rssi_inst > -110 || loop_cnt % 50 == 0) { // Print every ~250ms or if signal detected
-             printf("[Freq: %u] RSSI: %d dBm\n", freqs[freq_idx], rssi_inst);
+        if (loop_cnt % 1000 == 0) {
+            loop_cnt = 0;
+            printf("[RX Monitor] RSSI INST: %d dBm\n", rssi_inst);
+            printf("[irq_status=0x%04X]\n", irq_status);
+            printf("[PKT_STATUS RSSI] RSSI: %d dBm, SNR: %d dB\n", pkt_status.rssi_pkt_in_dbm, pkt_status.snr_pkt_in_db);
         }
 
-        // Scan Logic: Change frequency every 200 loops (approx 1 second)
-        if (scan_timer++ > 200) {
-            scan_timer = 0;
-            freq_idx = (freq_idx + 1) % (sizeof(freqs)/sizeof(uint32_t));
-            
-            // Stop RX, Change Freq, Start RX
-            sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC);
-            sx126x_set_rf_freq(&hal_ctx, freqs[freq_idx]);
-            sx126x_set_rx(&hal_ctx, 0);
-            printf(">>> Switching to Freq: %u Hz\n", freqs[freq_idx]);
-        }
-
-        // Check for IRQ
-        sx126x_get_irq_status(&hal_ctx, &irq_status);
-        
-        if (irq_status & SX126X_IRQ_RX_DONE) {
-            printf("\n!!! Packet Received at %u Hz !!!\n", freqs[freq_idx]);
-            
-            // Get payload length and pointer
-            sx126x_rx_buffer_status_t rx_status;
-            sx126x_get_rx_buffer_status(&hal_ctx, &rx_status);
-            
-            printf("Length: %d, Start: %d\n", rx_status.pld_len_in_bytes, rx_status.buffer_start_pointer);
-
-            uint8_t buffer[256];
-            memset(buffer, 0, sizeof(buffer));
-            if (rx_status.pld_len_in_bytes > 0) {
-                sx126x_read_buffer(&hal_ctx, rx_status.buffer_start_pointer, buffer, rx_status.pld_len_in_bytes);
-                printf("Data (Hex): ");
-                for(int i=0; i<rx_status.pld_len_in_bytes; i++) printf("%02X ", buffer[i]);
-                printf("\nData (Str): %s\n", buffer);
-            }
-
-            // Get RSSI/SNR
-            sx126x_get_lora_pkt_status(&hal_ctx, &pkt_status);
-            printf("RSSI: %d dBm, SNR: %d dB\n", pkt_status.rssi_pkt_in_dbm, pkt_status.snr_pkt_in_db);
-
-            // Clear IRQ
-            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-            
-            // Stay on this frequency! Don't scan anymore if we found something.
-            scan_timer = -10000; // Delay scanning for a long time
-            
-            // Restart RX
-            sx126x_set_rx(&hal_ctx, 0); 
-        }
-        else if (irq_status & SX126X_IRQ_CRC_ERROR) {
-            printf("CRC Error at %u Hz! (Signal detected but corrupted)\n", freqs[freq_idx]);
-            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-            sx126x_set_rx(&hal_ctx, 0);
-        }
-        else if (irq_status & SX126X_IRQ_TIMEOUT) {
-            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-            sx126x_set_rx(&hal_ctx, 0);
-        }
-
-        usleep(5000); // 5ms poll
-        usleep(5000); // 5ms poll
+        usleep(5000);
     }
 
     sx126x_hal_linux_cleanup(&hal_ctx);
