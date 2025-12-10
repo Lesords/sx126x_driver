@@ -9,10 +9,11 @@
 // --- CONFIGURATION ---
 // PLEASE UPDATE THESE VALUES FOR YOUR HARDWARE
 #define SPI_DEV_PATH "/dev/spidev3.0"
-#define GPIO_RESET   546  // Example GPIO number
-#define GPIO_BUSY    600  // Example GPIO number
-#define GPIO_DIO1    606   // Set to your DIO1 GPIO number (e.g., 547). Set -1 if not used (polling SPI).
-#define GPIO_RF_SW   553   // NEW: RF Switch GPIO
+#define GPIO_BASE    519
+#define GPIO_RESET   (GPIO_BASE + 34)
+#define GPIO_BUSY    (GPIO_BASE + 88)
+#define GPIO_DIO1    (GPIO_BASE + 94)
+#define GPIO_RF_SW   (GPIO_BASE + 41)
 // ---------------------
 
 #define RF_FREQUENCY 915000000 // 915 MHz (For Wio-SX1262 High Band)
