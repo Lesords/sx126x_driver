@@ -305,19 +305,17 @@ int main() {
     // Stop Rx
     // sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC);
 
+    // Monitor RSSI
+    int16_t rssi_inst = 0;
+    sx126x_get_rssi_inst(&hal_ctx, &rssi_inst);
+
+    printf("[RX Monitor] RSSI INST: %d dBm\n", rssi_inst);
+
     int loop_cnt = 0;
     while (1) {
-        // Monitor RSSI
-        int16_t rssi_inst = 0;
-        sx126x_get_rssi_inst(&hal_ctx, &rssi_inst);
-
-        // Get RSSI/SNR
-        sx126x_pkt_status_lora_t pkt_status;
-        sx126x_get_lora_pkt_status(&hal_ctx, &pkt_status);
-
         uint16_t irq_status = 0;
         sx126x_get_irq_status(&hal_ctx, &irq_status);
-        
+
         if (irq_status & SX126X_IRQ_RX_DONE) {
             printf("\nPacket Received!\n");
 
@@ -325,6 +323,11 @@ int main() {
             sx126x_rx_buffer_status_t rx_status;
             sx126x_get_rx_buffer_status(&hal_ctx, &rx_status);
             printf("Length: %d, Start: %d\n", rx_status.pld_len_in_bytes, rx_status.buffer_start_pointer);
+
+            // Get RSSI/SNR
+            sx126x_pkt_status_lora_t pkt_status;
+            sx126x_get_lora_pkt_status(&hal_ctx, &pkt_status);
+            printf("[PKT_STATUS RSSI] RSSI: %d dBm, SNR: %d dB\n", pkt_status.rssi_pkt_in_dbm, pkt_status.snr_pkt_in_db);
 
             uint8_t buffer[256];
             memset(buffer, 0, sizeof(buffer));
@@ -356,12 +359,10 @@ int main() {
         loop_cnt++;
         if (loop_cnt % 1000 == 0) {
             loop_cnt = 0;
-            printf("[RX Monitor] RSSI INST: %d dBm\n", rssi_inst);
             printf("[irq_status=0x%04X]\n", irq_status);
-            printf("[PKT_STATUS RSSI] RSSI: %d dBm, SNR: %d dB\n", pkt_status.rssi_pkt_in_dbm, pkt_status.snr_pkt_in_db);
         }
 
-        usleep(5000);
+        usleep(100 * 1000);
     }
 
     sx126x_hal_linux_cleanup(&hal_ctx);
