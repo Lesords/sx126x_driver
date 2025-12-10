@@ -36,8 +36,23 @@ void check_status(sx126x_status_t status, const char* msg) {
     }
 }
 
-int main() {
-    printf("Starting SX126x LoRa Demo...\n");
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("Usage: %s [tx|rx]\n", argv[0]);
+        printf("  tx: Transmitter mode (Continuous)\n");
+        printf("  rx: Receiver mode (Continuous)\n");
+        return 1;
+    }
+
+    int mode = 0; // 1=TX, 2=RX
+    if (strcmp(argv[1], "tx") == 0) mode = 1;
+    else if (strcmp(argv[1], "rx") == 0) mode = 2;
+    else {
+        printf("Invalid mode. Use 'tx' or 'rx'.\n");
+        return 1;
+    }
+
+    printf("Starting SX126x LoRa Demo in %s mode...\n", mode == 1 ? "TX" : "RX");
 
     // 1. Initialize HAL
     if (sx126x_hal_linux_init(&hal_ctx) != 0) {
@@ -144,27 +159,9 @@ int main() {
     
     check_status(sx126x_set_lora_mod_params(&hal_ctx, &mod_params), "Set Modulation Params");
 
-        // --- PHASE 1: TX (Send 100 packets rapidly for Spectrum Analyzer) ---
-    printf("--- PHASE 1: Sending 100 Packets (Rapid Fire) ---\n");
-    
-    // TX Configuration
-    sx126x_pkt_params_lora_t tx_pkt_params;
-    tx_pkt_params.preamble_len_in_symb = 12; // Longer preamble
-    tx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-    tx_pkt_params.pld_len_in_bytes = 64; // Longer payload for visibility
-    tx_pkt_params.crc_is_on = true;      
-    tx_pkt_params.invert_iq_is_on = false; // Standard IQ for Uplink
-    check_status(sx126x_set_lora_pkt_params(&hal_ctx, &tx_pkt_params), "Set TX Packet Params");
-
+    // --- COMMON CONFIGURATION ---
     // Set Sync Word (Public)
     check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
-
-    // --- DIAGNOSTIC: Read back Sync Word ---
-    uint8_t sync_word_buff[2] = {0};
-    sx126x_read_register(&hal_ctx, SX126X_REG_LR_SYNCWORD, sync_word_buff, 2);
-    uint16_t sync_word_val = (sync_word_buff[0] << 8) | sync_word_buff[1];
-    printf(">>> SYNC WORD CHECK: Wrote 0x3444 (Public), Read 0x%04X <<<\n", sync_word_val);
-    // ---------------------------------------
 
     // Set Frequency (Ensure it's 915MHz)
     printf("Setting Frequency to 915MHz via Command...\n");
@@ -173,6 +170,22 @@ int main() {
     // Check Status immediately
     sx126x_get_status(&hal_ctx, &chip_status);
     printf("Status after SetFreq: CmdStatus=%d\n", chip_status.cmd_status);
+
+    if (mode == 1) {
+        printf("--- PHASE 1: TX Mode (Continuous) ---\n");
+        
+        // Manual RF Switch Control for TX
+        printf("Setting RF_SW (GPIO %d) to HIGH for TX...\n", hal_ctx.rf_sw_gpio);
+        gpio_set_value(hal_ctx.rf_sw_gpio, 1);
+        
+        // TX Configuration
+        sx126x_pkt_params_lora_t tx_pkt_params;
+        tx_pkt_params.preamble_len_in_symb = 12; 
+        tx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
+        tx_pkt_params.pld_len_in_bytes = 64; 
+        tx_pkt_params.crc_is_on = true;      
+        tx_pkt_params.invert_iq_is_on = false; // Standard IQ for Uplink
+        check_status(sx126x_set_lora_pkt_params(&hal_ctx, &tx_pkt_params), "Set TX Packet Params");
 
     // --- VERIFY FREQUENCY ---
     // 1. Calculate Register Value for 915MHz
@@ -202,78 +215,70 @@ int main() {
     }
     // ------------------------
 
-    // Set IRQ for TX
-    check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
-                                           SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
-                                           SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
+        // Set IRQ for TX
+        check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
+                                               SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
+                                               SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
 
-    printf("--- PHASE 1: Sending 30 Packets (Rapid Fire) ---\n");
-    printf("Note: Toggling RF_SW (GPIO %d) every 10 packets to test switch logic.\n", hal_ctx.rf_sw_gpio);
+        printf("Starting Continuous TX Loop...\n");
+        int i = 0;
+        while (1) {
+            i++;
+            printf("Sending Packet %d... ", i);
+            
+            uint8_t tx_buffer[64];
+            memset(tx_buffer, 0xAA, sizeof(tx_buffer)); 
+            snprintf((char*)tx_buffer, sizeof(tx_buffer), "Ping %d - Wio-SX1262 Test Packet...", i);
+            
+            sx126x_write_buffer(&hal_ctx, 0x00, tx_buffer, sizeof(tx_buffer));
+            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
+            sx126x_set_tx(&hal_ctx, 1000); // 1s timeout
 
-    int rf_sw_state = 1; // Start with HIGH (Default)
-    gpio_set_value(hal_ctx.rf_sw_gpio, rf_sw_state);
-    for (int i = 1; i <= 30; i++) {
-        // Toggle RF_SW every 20 packets for testing
-        if (i % 10 == 0) {
-            rf_sw_state = !rf_sw_state;
-
-            if (rf_sw_state == 1) {
-                printf(">>> RF_SW (GPIO %d) set to HIGH (Default) <<<\n", hal_ctx.rf_sw_gpio);
-            } else {
-                printf(">>> RF_SW (GPIO %d) set to LOW (Testing Inverted Logic) <<<\n", hal_ctx.rf_sw_gpio);
+            // Wait for TX_DONE
+            int wait_limit = 200; 
+            uint16_t irq_status = 0;
+            bool tx_done = false;
+            while(wait_limit-- > 0) {
+                sx126x_get_irq_status(&hal_ctx, &irq_status);
+                if (irq_status & SX126X_IRQ_TX_DONE) {
+                    printf("TX DONE!\n");
+                    tx_done = true;
+                    break;
+                }
+                if (irq_status & SX126X_IRQ_TIMEOUT) {
+                    printf("TX TIMEOUT!\n");
+                    break;
+                }
+                usleep(5000); 
             }
-
-            gpio_set_value(hal_ctx.rf_sw_gpio, rf_sw_state);
+            if (!tx_done) printf("Wait timeout\n");
+            
+            sleep(1); 
         }
-
-        printf("Sending Packet %d/30... ", i);
-        
-        uint8_t tx_buffer[64];
-        memset(tx_buffer, 0xAA, sizeof(tx_buffer)); // Fill with pattern
-        snprintf((char*)tx_buffer, sizeof(tx_buffer), "Ping %d - Wio-SX1262 Test Packet for Spectrum Analyzer...", i);
-        
-        sx126x_write_buffer(&hal_ctx, 0x00, tx_buffer, sizeof(tx_buffer));
-        sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-        sx126x_set_tx(&hal_ctx, 1000); // 1s timeout
-
-        // Wait for TX_DONE
-        int wait_limit = 100; 
-        uint16_t irq_status = 0;
-        bool tx_done = false;
-        while(wait_limit-- > 0) {
-            sx126x_get_irq_status(&hal_ctx, &irq_status);
-            if (irq_status & SX126X_IRQ_TX_DONE) {
-                printf("TX DONE!\n");
-                tx_done = true;
-                break;
-            }
-            if (irq_status & SX126X_IRQ_TIMEOUT) {
-                printf("TX TIMEOUT!\n");
-                break;
-            }
-            usleep(5000); // 5ms check
-        }
-        if (!tx_done) printf("Wait timeout\n");
-        
-        // Short delay to keep duty cycle high for visibility
-        usleep(50000); // 50ms delay
     }
     
-    // --- PHASE 2: RX (Continuous) ---
-    printf("\n--- PHASE 2: Entering RX Mode ---\n");
+    if (mode == 2) {
+        // --- PHASE 2: RX (Continuous) ---
+        printf("\n--- PHASE 2: Entering RX Mode ---\n");
 
-    // RX Configuration
-    sx126x_pkt_params_lora_t rx_pkt_params;
-    rx_pkt_params.preamble_len_in_symb = 8;
-    rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-    rx_pkt_params.pld_len_in_bytes = 64; // Max length for RX
-    rx_pkt_params.crc_is_on = false;      // Don't enforce CRC check for now
-    rx_pkt_params.invert_iq_is_on = false; // Listen for Downlink (Inverted IQ)
-    check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
+        // Manual RF Switch Control for RX
+        // Assuming High = TX, Low = RX (Common for PE4259 etc.)
+        // Since TX worked with High, let's try Low for RX.
+        printf("Setting RF_SW (GPIO %d) to LOW for RX...\n", hal_ctx.rf_sw_gpio);
+        gpio_set_value(hal_ctx.rf_sw_gpio, 0);
+
+        // RX Configuration
+        sx126x_pkt_params_lora_t rx_pkt_params;
+        rx_pkt_params.preamble_len_in_symb = 12; // Match TX
+        rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
+        rx_pkt_params.pld_len_in_bytes = 64; // Match TX
+        rx_pkt_params.crc_is_on = true;      // Match TX
+        rx_pkt_params.invert_iq_is_on = false; // Match TX
+        check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
 
     // Set IRQ for RX
-    check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT,
-                                           SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT,
+    check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+                                           SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
                                            SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
 
     // --- NEW: Set Sync Word back to Public (0x34) ---
@@ -302,19 +307,18 @@ int main() {
     // Let's try 0 (Single mode, wait forever) and restart in loop.
     check_status(sx126x_set_rx(&hal_ctx, 0), "Set RX"); 
 
-    // Stop Rx
-    // sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC);
-
-    // Monitor RSSI
-    int16_t rssi_inst = 0;
-    sx126x_get_rssi_inst(&hal_ctx, &rssi_inst);
-
-    printf("[RX Monitor] RSSI INST: %d dBm\n", rssi_inst);
+    // Start RX
+    sx126x_set_rx(&hal_ctx, 0); // Continuous
 
     int loop_cnt = 0;
     while (1) {
         uint16_t irq_status = 0;
         sx126x_get_irq_status(&hal_ctx, &irq_status);
+
+        // DEBUG: Print IRQ Status periodically
+        if (loop_cnt % 10 == 0) {
+             // printf("[RX Loop] IRQ: 0x%04X\n", irq_status);
+        }
 
         if (irq_status & SX126X_IRQ_RX_DONE) {
             printf("\nPacket Received!\n");
@@ -346,6 +350,14 @@ int main() {
             // Restart Rx
             sx126x_set_rx(&hal_ctx, 0);
         }
+        else if (irq_status & SX126X_IRQ_PREAMBLE_DETECTED) {
+            printf("Preamble Detected!\n");
+            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_PREAMBLE_DETECTED);
+        }
+        else if (irq_status & SX126X_IRQ_HEADER_VALID) {
+            printf("Header Valid!\n");
+            sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_HEADER_VALID);
+        }
         else if (irq_status & SX126X_IRQ_CRC_ERROR) {
             printf("CRC Error!\n");
             sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
@@ -363,6 +375,7 @@ int main() {
         }
 
         usleep(100 * 1000);
+    }
     }
 
     sx126x_hal_linux_cleanup(&hal_ctx);

@@ -11,7 +11,7 @@
 #include <time.h>
 #include <errno.h>
 
-#define SPI_SPEED_HZ 100000 // 100 kHz for debugging
+#define SPI_SPEED_HZ 100000 // 100 kHz
 
 // Helper to export and configure GPIO
 static int gpio_export(int gpio) {
@@ -70,8 +70,13 @@ int sx126x_hal_linux_init(sx126x_hal_context_t *ctx) {
     uint8_t bits = 8;
     uint32_t speed = SPI_SPEED_HZ;
 
+    // Force SPI Mode 0 (CPOL=0, CPHA=0)
     if (ioctl(ctx->spi_fd, SPI_IOC_WR_MODE, &mode) < 0) {
         perror("Failed to set SPI mode");
+        return -1;
+    }
+    if (ioctl(ctx->spi_fd, SPI_IOC_RD_MODE, &mode) < 0) {
+        perror("Failed to set SPI RD mode");
         return -1;
     }
     if (ioctl(ctx->spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) {
@@ -117,8 +122,11 @@ static void sx126x_hal_wait_on_busy( const void* context ) {
     int timeout = 1000; // 1s timeout roughly
     int busy_val = gpio_get_value(ctx->busy_gpio);
     
+    // DEBUG: Print BUSY state
+    // printf("HAL: BUSY State = %d\n", busy_val);
+
     if (busy_val == 1) {
-        // printf("HAL: BUSY is High, waiting...\n");
+        printf("HAL: BUSY is High, waiting...\n");
         while (busy_val == 1 && timeout > 0) {
             usleep(1000); // 1ms
             timeout--;
@@ -126,6 +134,8 @@ static void sx126x_hal_wait_on_busy( const void* context ) {
         }
         if (timeout == 0) {
             printf("HAL: BUSY Timeout! GPIO %d stuck High?\n", ctx->busy_gpio);
+        } else {
+            printf("HAL: BUSY Released.\n");
         }
     }
 }
@@ -136,33 +146,49 @@ sx126x_hal_status_t sx126x_hal_write( const void* context, const uint8_t* comman
     
     sx126x_hal_wait_on_busy(context);
 
-    struct spi_ioc_transfer tr[2];
-    memset(tr, 0, sizeof(tr));
+    // Combine command and data into a single buffer to ensure CS stays low
+    uint8_t* tx_buffer = (uint8_t*)malloc(command_length + data_length);
+    if (!tx_buffer) return SX126X_HAL_STATUS_ERROR;
 
-    tr[0].tx_buf = (unsigned long)command;
-    tr[0].len = command_length;
-    tr[0].speed_hz = SPI_SPEED_HZ;
-    tr[0].bits_per_word = 8;
-    // If there is data, we keep CS low. If not, we deselect.
-    // However, spidev usually deselects after the whole ioctl message unless cs_change is set appropriately.
-    // We want CS to stay low between command and data.
-    // By default, spidev asserts CS for the duration of the ioctl (all transfers).
-    // So we just need to put them in one ioctl.
-
-    int num_transfers = 1;
-
+    memcpy(tx_buffer, command, command_length);
     if (data_length > 0) {
-        tr[1].tx_buf = (unsigned long)data;
-        tr[1].len = data_length;
-        tr[1].speed_hz = SPI_SPEED_HZ;
-        tr[1].bits_per_word = 8;
-        num_transfers = 2;
+        memcpy(tx_buffer + command_length, data, data_length);
     }
 
-    if (ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(num_transfers), tr) < 0) {
-        perror("SPI write failed");
+    struct spi_ioc_transfer tr;
+    memset(&tr, 0, sizeof(tr));
+
+    // We need a RX buffer to see the status byte even for writes
+    uint8_t* rx_buffer = (uint8_t*)malloc(command_length + data_length);
+    if (!rx_buffer) {
+        free(tx_buffer);
         return SX126X_HAL_STATUS_ERROR;
     }
+    memset(rx_buffer, 0, command_length + data_length);
+
+    tr.tx_buf = (unsigned long)tx_buffer;
+    tr.rx_buf = (unsigned long)rx_buffer;
+    tr.len = command_length + data_length;
+    tr.speed_hz = SPI_SPEED_HZ;
+    tr.bits_per_word = 8;
+    tr.delay_usecs = 10; // Add delay to ensure timing
+
+    int ret = ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(1), &tr);
+    
+    if (ret < 0) {
+        perror("SPI write failed");
+        free(tx_buffer);
+        free(rx_buffer);
+        return SX126X_HAL_STATUS_ERROR;
+    }
+
+    // DEBUG: Print Write Response (Status)
+    printf("SPI Write (Cmd=0x%02X, Len=%d): ", command[0], command_length + data_length);
+    for(int i=0; i<command_length + data_length; i++) printf("%02X ", rx_buffer[i]);
+    printf("\n");
+
+    free(tx_buffer);
+    free(rx_buffer);
 
     return SX126X_HAL_STATUS_OK;
 }
@@ -173,34 +199,56 @@ sx126x_hal_status_t sx126x_hal_read( const void* context, const uint8_t* command
 
     sx126x_hal_wait_on_busy(context);
 
-    struct spi_ioc_transfer tr[2];
-    memset(tr, 0, sizeof(tr));
-
-    // Send command
-    tr[0].tx_buf = (unsigned long)command;
-    tr[0].len = command_length;
-    tr[0].speed_hz = SPI_SPEED_HZ;
-    tr[0].bits_per_word = 8;
-
-    // Receive data
-    // Note: SX126x usually requires sending NOPs while reading?
-    // The HAL definition says "command" then "data" (received).
-    // The SPI transaction is: CS Low -> Command -> Read Data -> CS High.
-    // During Read Data phase, MOSI is usually ignored or NOP (0x00).
+    // Combine command and data read into a single transaction
+    // We send Command + NOPs (for data read)
+    // We receive Status + Data
     
-    if (data_length > 0) {
-        tr[1].rx_buf = (unsigned long)data;
-        tr[1].len = data_length;
-        tr[1].speed_hz = SPI_SPEED_HZ;
-        tr[1].bits_per_word = 8;
-        // We don't set tx_buf, so it sends 0s (NOPs) usually, or we should explicitly send NOPs?
-        // spidev sends 0 if tx_buf is NULL.
-    }
-
-    if (ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(data_length > 0 ? 2 : 1), tr) < 0) {
-        perror("SPI read failed");
+    uint16_t total_len = command_length + data_length;
+    uint8_t* tx_buffer = (uint8_t*)malloc(total_len);
+    uint8_t* rx_buffer = (uint8_t*)malloc(total_len);
+    
+    if (!tx_buffer || !rx_buffer) {
+        if (tx_buffer) free(tx_buffer);
+        if (rx_buffer) free(rx_buffer);
         return SX126X_HAL_STATUS_ERROR;
     }
+
+    memset(tx_buffer, 0, total_len);
+    memcpy(tx_buffer, command, command_length);
+    // The rest of tx_buffer (data part) is 0 (NOP)
+
+    struct spi_ioc_transfer tr;
+    memset(&tr, 0, sizeof(tr));
+
+    tr.tx_buf = (unsigned long)tx_buffer;
+    tr.rx_buf = (unsigned long)rx_buffer;
+    tr.len = total_len;
+    tr.speed_hz = SPI_SPEED_HZ;
+    tr.bits_per_word = 8;
+    tr.cs_change = 0; // Keep CS active if needed, but usually 0 is fine for single transfer
+    tr.delay_usecs = 10; // Add delay
+
+    int ret = ioctl(ctx->spi_fd, SPI_IOC_MESSAGE(1), &tr);
+    
+    if (ret < 0) {
+        perror("SPI read failed");
+        free(tx_buffer);
+        free(rx_buffer);
+        return SX126X_HAL_STATUS_ERROR;
+    }
+
+    // DEBUG: Print RX Buffer
+    printf("SPI Read (CmdLen=%d, DataLen=%d): ", command_length, data_length);
+    for(int i=0; i<total_len; i++) printf("%02X ", rx_buffer[i]);
+    printf("\n");
+
+    // Copy the data part to the user buffer
+    if (data_length > 0) {
+        memcpy(data, rx_buffer + command_length, data_length);
+    }
+
+    free(tx_buffer);
+    free(rx_buffer);
 
     return SX126X_HAL_STATUS_OK;
 }
