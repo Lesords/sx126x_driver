@@ -207,20 +207,26 @@ int main() {
                                            SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
                                            SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
 
-    printf("--- PHASE 1: Sending 100 Packets (Rapid Fire) ---\n");
-    printf("Note: Toggling RF_SW (GPIO %d) every 20 packets to test switch logic.\n", hal_ctx.rf_sw_gpio);
+    printf("--- PHASE 1: Sending 30 Packets (Rapid Fire) ---\n");
+    printf("Note: Toggling RF_SW (GPIO %d) every 10 packets to test switch logic.\n", hal_ctx.rf_sw_gpio);
 
-    for (int i = 1; i <= 100; i++) {
+    int rf_sw_state = 1; // Start with HIGH (Default)
+    gpio_set_value(hal_ctx.rf_sw_gpio, rf_sw_state);
+    for (int i = 1; i <= 30; i++) {
         // Toggle RF_SW every 20 packets for testing
-        if (i % 40 == 1) {
-            printf(">>> RF_SW (GPIO %d) set to HIGH (Default) <<<\n", hal_ctx.rf_sw_gpio);
-            gpio_set_value(hal_ctx.rf_sw_gpio, 1);
-        } else if (i % 40 == 21) {
-            printf(">>> RF_SW (GPIO %d) set to LOW (Testing Inverted Logic) <<<\n", hal_ctx.rf_sw_gpio);
-            gpio_set_value(hal_ctx.rf_sw_gpio, 0);
+        if (i % 10 == 0) {
+            rf_sw_state = !rf_sw_state;
+
+            if (rf_sw_state == 1) {
+                printf(">>> RF_SW (GPIO %d) set to HIGH (Default) <<<\n", hal_ctx.rf_sw_gpio);
+            } else {
+                printf(">>> RF_SW (GPIO %d) set to LOW (Testing Inverted Logic) <<<\n", hal_ctx.rf_sw_gpio);
+            }
+
+            gpio_set_value(hal_ctx.rf_sw_gpio, rf_sw_state);
         }
 
-        printf("Sending Packet %d/100... ", i);
+        printf("Sending Packet %d/30... ", i);
         
         uint8_t tx_buffer[64];
         memset(tx_buffer, 0xAA, sizeof(tx_buffer)); // Fill with pattern
