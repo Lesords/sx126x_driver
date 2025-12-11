@@ -262,35 +262,24 @@ int main(int argc, char *argv[]) {
             gpio_set_value(hal_ctx.rf_sw_gpio, 1); // 高电平 = 接收
         }
 
-        // // RX Configuration
-        // sx126x_pkt_params_lora_t rx_pkt_params;
-        // rx_pkt_params.preamble_len_in_symb = 8; // Match TX
-        // rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-        // rx_pkt_params.pld_len_in_bytes = 0; // Match TX
-        // rx_pkt_params.crc_is_on = true;      // Match TX
-        // rx_pkt_params.invert_iq_is_on = false; // Match TX
-        // check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
+        // RX Configuration(非必要，前面配置过了)
+        sx126x_pkt_params_lora_t rx_pkt_params;
+        rx_pkt_params.preamble_len_in_symb = 8;                         // Match TX
+        rx_pkt_params.header_type          = SX126X_LORA_PKT_EXPLICIT;
+        rx_pkt_params.pld_len_in_bytes     = 0;                         // Match TX
+        rx_pkt_params.crc_is_on            = true;                      // Match TX
+        rx_pkt_params.invert_iq_is_on      = false;                     // Match TX
+        check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
 
-        // // Set IRQ for RX
-        // check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
-        //                                        SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
-        //                                        SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
-
-        // // --- NEW: Set Sync Word back to Public (0x34) ---
-        // // Most Gateways use Public Network.
-        // check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
-
-        // // Check for errors one last time before starting
-        // sx126x_get_device_errors(&hal_ctx, &device_errors);
-        // if (device_errors != 0) {
-        //     printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
-        //     sx126x_clear_device_errors(&hal_ctx);
-        // }
-
+        // Set IRQ for RX (非必要，前面配置过了)
+        check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+                                               SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+                                               SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
 
         // 清掉可能残留的中断标志，进入连续接收
         sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-        // sx126x_set_rx_with_timeout_in_rtc_step(&hal_ctx, SX126X_RX_CONTINUOUS);
+        // 必须设为这个，否则无法接收到包数据！！！
+        sx126x_set_rx_with_timeout_in_rtc_step(&hal_ctx, SX126X_RX_CONTINUOUS);
 
         // Start RX
         // SX126X_RX_CONTINUOUS is 0xFFFFFF
@@ -300,7 +289,7 @@ int main(int argc, char *argv[]) {
         // To be safe for continuous RX, we should use a large value or 0 if we restart manually.
         // Let's try 0 (Single mode, wait forever) and restart in loop.
 
-        sx126x_set_rx(&hal_ctx, 0xFFFFFF); // 0 = wait forever
+        // sx126x_set_rx(&hal_ctx, 0xFFFFFF); // 0 = wait forever
 
         int loop_cnt = 0;
         while (1) {
