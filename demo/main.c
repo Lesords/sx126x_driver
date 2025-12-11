@@ -86,18 +86,15 @@ int main(int argc, char *argv[]) {
 
     // --- 1. 优先配置 TCXO (解决起振失败问题) ---
     // Configure DIO3 as TCXO control (Voltage: 1.7V, Timeout: 20ms)
-    // 增加超时时间：320 -> 1280 (20ms)，确保 TCXO 有足够时间稳定
-    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 1280), "Set TCXO");
+    // 增加超时时间：320 -> 1280 (20ms)，确保 TCXO 有足够时间稳定 3000 (47ms)
+    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 3000), "Set TCXO");
+    usleep(50000);
 
     // 显式设置为 DCDC 模式 (Wio-SX1262 通常支持 DCDC)
     check_status(sx126x_set_reg_mode(&hal_ctx, SX126X_REG_MODE_DCDC), "Set Regulator DCDC");
 
-    // Calibrate Image (Important for Frequency Setting)
-    // For 915MHz (Band 902-928), we use freq 902 & 928
-    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
-
     // Configure DIO2 as RF Switch control
-    check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
+    // check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
 
     // --- 2. 强制切换到 XOSC 模式以验证时钟 ---
     // 这会立即尝试启动 TCXO。如果失败，Device Errors 会置位。
@@ -105,11 +102,6 @@ int main(int argc, char *argv[]) {
 
     // --- 3. 清除启动时的瞬态错误 ---
     sx126x_clear_device_errors(&hal_ctx);
-
-    // --- Calibrate Image (Important for Frequency Setting) ---
-    // For 915MHz (Band 902-928), we use freq 902 & 928
-    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
-    // ----------------------------------
 
     // --- 3. 现在检查错误 (应该是 0x0000) ---
     sx126x_errors_mask_t device_errors;
@@ -166,6 +158,10 @@ int main(int argc, char *argv[]) {
     printf("Setting Frequency to 915MHz via Command...\n");
     check_status(sx126x_set_rf_freq(&hal_ctx, 915000000), "Set RF Frequency (915MHz)");
 
+    // --- Calibrate Image (Important for Frequency Setting) ---
+    // For 915MHz (Band 902-928), we use freq 902 & 928
+    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
+
     // Check Status immediately
     sx126x_get_status(&hal_ctx, &chip_status);
     printf("Status after SetFreq: CmdStatus=%d\n", chip_status.cmd_status);
@@ -174,8 +170,8 @@ int main(int argc, char *argv[]) {
         printf("--- PHASE 1: TX Mode (Continuous) ---\n");
 
         // Manual RF Switch Control for TX
-        printf("Setting RF_SW (GPIO %d) to HIGH for TX...\n", hal_ctx.rf_sw_gpio);
-        gpio_set_value(hal_ctx.rf_sw_gpio, 1);
+        printf("Setting RF_SW (GPIO %d) to LOW for TX...\n", hal_ctx.rf_sw_gpio);
+        gpio_set_value(hal_ctx.rf_sw_gpio, 0);
 
         // TX Configuration
         sx126x_pkt_params_lora_t tx_pkt_params;
@@ -185,34 +181,6 @@ int main(int argc, char *argv[]) {
         tx_pkt_params.crc_is_on = true;      
         tx_pkt_params.invert_iq_is_on = false; // Standard IQ for Uplink
         check_status(sx126x_set_lora_pkt_params(&hal_ctx, &tx_pkt_params), "Set TX Packet Params");
-
-        // --- VERIFY FREQUENCY ---
-        // 1. Calculate Register Value for 915MHz
-        // Freq = Reg * 32MHz / 2^25
-        // Reg = 915000000 * 2^25 / 32000000 = 959447040 = 0x39300000
-        uint32_t target_freq_reg = 0x39300000; 
-        uint8_t freq_buff[4];
-        freq_buff[0] = (target_freq_reg >> 24) & 0xFF;
-        freq_buff[1] = (target_freq_reg >> 16) & 0xFF;
-        freq_buff[2] = (target_freq_reg >> 8) & 0xFF;
-        freq_buff[3] = (target_freq_reg >> 0) & 0xFF;
-
-        // 2. Force Write to Register 0x0860 (To ensure it's readable)
-        sx126x_write_register(&hal_ctx, 0x0860, freq_buff, 4);
-
-        // 3. Read Back
-        uint8_t freq_reg[4] = {0};
-        sx126x_read_register(&hal_ctx, 0x0860, freq_reg, 4);
-        uint32_t freq_reg_val = (freq_reg[0] << 24) | (freq_reg[1] << 16) | (freq_reg[2] << 8) | freq_reg[3];
-        double freq_hz = (double)freq_reg_val * 32000000.0 / 33554432.0;
-
-        printf(">>> FREQUENCY CHECK: Register 0x0860 = 0x%08X, Calculated = %.2f Hz <<<\n", freq_reg_val, freq_hz);
-        printf(">>> TARGET FREQUENCY: %d Hz <<<\n", 915000000);
-
-        if (freq_reg_val == 0) {
-            printf("WARNING: Register readback failed. Ignoring if TX DONE works.\n");
-        }
-        // ------------------------
 
         // Set IRQ for TX
         check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
@@ -263,8 +231,8 @@ int main(int argc, char *argv[]) {
         // Manual RF Switch Control for RX
         // Assuming High = TX, Low = RX (Common for PE4259 etc.)
         // Since TX worked with High, let's try Low for RX.
-        printf("Setting RF_SW (GPIO %d) to LOW for RX...\n", hal_ctx.rf_sw_gpio);
-        gpio_set_value(hal_ctx.rf_sw_gpio, 0);
+        printf("Setting RF_SW (GPIO %d) to HIGH for RX...\n", hal_ctx.rf_sw_gpio);
+        gpio_set_value(hal_ctx.rf_sw_gpio, 1);
 
         // RX Configuration
         sx126x_pkt_params_lora_t rx_pkt_params;
@@ -304,10 +272,6 @@ int main(int argc, char *argv[]) {
         // If we pass 0, it's Single mode without timeout (wait forever).
         // To be safe for continuous RX, we should use a large value or 0 if we restart manually.
         // Let's try 0 (Single mode, wait forever) and restart in loop.
-        check_status(sx126x_set_rx(&hal_ctx, 0), "Set RX"); 
-
-        // Start RX
-        sx126x_set_rx(&hal_ctx, 0); // Continuous
 
         int loop_cnt = 0;
         while (1) {
@@ -373,7 +337,7 @@ int main(int argc, char *argv[]) {
                 printf("[irq_status=0x%04X]\n", irq_status);
             }
 
-            usleep(100 * 1000);
+            usleep(1 * 1000);
         }
     }
 
