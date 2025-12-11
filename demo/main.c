@@ -13,6 +13,7 @@
 #define GPIO_RESET   (GPIO_BASE + 34)
 #define GPIO_BUSY    (GPIO_BASE + 88)
 #define GPIO_DIO1    (GPIO_BASE + 94)
+// 外挂 RF_SW 由 SoC GPIO 控制，高=RX，低=TX
 #define GPIO_RF_SW   (GPIO_BASE + 41)
 // ---------------------
 
@@ -64,6 +65,10 @@ int main(int argc, char *argv[]) {
     printf("Resetting radio...\n");
     sx126x_reset(&hal_ctx);
 
+    // new addition
+    sx126x_init_retention_list(&hal_ctx);
+    sx126x_set_reg_mode(&hal_ctx, SX126X_REG_MODE_LDO);
+
     // --- DIAGNOSTICS: Read Chip Info ---
     sx126x_chip_status_t chip_status;
     sx126x_get_status(&hal_ctx, &chip_status);
@@ -82,50 +87,57 @@ int main(int argc, char *argv[]) {
     // ----------------------------------
 
     // Set Standby first to allow reading registers safely
-    check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC), "Set Standby");
+    // 不能使用这个函数，会导致芯片休眠！！！
+    // check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_RC), "Set Standby");
 
-    // --- 1. 优先配置 TCXO (解决起振失败问题) ---
-    // Configure DIO3 as TCXO control (Voltage: 1.7V, Timeout: 20ms)
-    // 增加超时时间：320 -> 1280 (20ms)，确保 TCXO 有足够时间稳定 3000 (47ms)
-    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_7V, 3000), "Set TCXO");
-    usleep(50000);
+    // 先用 LDO 供电保证稳定，如需再评估切 DCDC
+    check_status(sx126x_set_reg_mode(&hal_ctx, SX126X_REG_MODE_DCDC), "Set Regulator LDO");
 
-    // 显式设置为 DCDC 模式 (Wio-SX1262 通常支持 DCDC)
-    check_status(sx126x_set_reg_mode(&hal_ctx, SX126X_REG_MODE_DCDC), "Set Regulator DCDC");
+    // 由芯片通过 DIO2 自动控制射频开关（同时保留外部 RF_SW GPIO）
+    check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
 
-    // Configure DIO2 as RF Switch control
-    // check_status(sx126x_set_dio2_as_rf_sw_ctrl(&hal_ctx, true), "Set DIO2 as RF Switch");
+    // --- 1. 优先配置 TCXO & 供电模式 ---
+    // Wio-SX1262 常用 1.8V TCXO，先保证时钟稳定，再切到 XOSC
+    check_status(sx126x_set_dio3_as_tcxo_ctrl(&hal_ctx, SX126X_TCXO_CTRL_1_8V, 165), "Set TCXO 1.8V");
+    // usleep(5000);
 
-    // --- 2. 强制切换到 XOSC 模式以验证时钟 ---
-    // 这会立即尝试启动 TCXO。如果失败，Device Errors 会置位。
-    check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_XOSC), "Set Standby XOSC");
+    sx126x_cal(&hal_ctx, SX126X_CAL_ALL); // 902-928MHz
 
-    // --- 3. 清除启动时的瞬态错误 ---
-    sx126x_clear_device_errors(&hal_ctx);
+    sx126x_cfg_rx_boosted(&hal_ctx, true); // RX Boosted for better sensitivity
 
-    // --- 3. 现在检查错误 (应该是 0x0000) ---
-    sx126x_errors_mask_t device_errors;
-    sx126x_get_device_errors(&hal_ctx, &device_errors);
-    printf("Device Errors: 0x%04X\n", device_errors);
-
-    // Check Status again to see if it cleared
-    sx126x_get_status(&hal_ctx, &chip_status);
-    printf("Chip Status after Init: CmdStatus=%d, ChipMode=%d\n", chip_status.cmd_status, chip_status.chip_mode);
-    if (device_errors & SX126X_ERRORS_RC64K_CALIBRATION) printf("  - RC64K Calibration Failed\n");
-    if (device_errors & SX126X_ERRORS_RC13M_CALIBRATION) printf("  - RC13M Calibration Failed\n");
-    if (device_errors & SX126X_ERRORS_PLL_CALIBRATION)   printf("  - PLL Calibration Failed\n");
-    if (device_errors & SX126X_ERRORS_ADC_CALIBRATION)   printf("  - ADC Calibration Failed\n");
-    if (device_errors & SX126X_ERRORS_IMG_CALIBRATION)   printf("  - Image Calibration Failed\n");
-    if (device_errors & SX126X_ERRORS_XOSC_START)  printf("  - XOSC Failed to Start\n");
-    if (device_errors & SX126X_ERRORS_PLL_LOCK)    printf("  - PLL Lock Failed\n");
-    if (device_errors & SX126X_ERRORS_PA_RAMP)     printf("  - PA Ramp Failed\n");
+    sx126x_stop_timer_on_preamble(&hal_ctx, false);
+    sx126x_set_lora_symb_nb_timeout(&hal_ctx, 0); // No timeout
 
     // 4. Set Packet Type
     check_status(sx126x_set_pkt_type(&hal_ctx, SX126X_PKT_TYPE_LORA), "Set Packet Type");
+    
+    sx126x_set_rf_freq(&hal_ctx, RF_FREQUENCY);
 
-    // 5. Set RF Frequency
-    // check_status(sx126x_set_rf_freq(&hal_ctx, RF_FREQUENCY), "Set RF Frequency");
-    // MOVED TO LOOP FOR SCANNING
+    // // --- 2. 强制切换到 XOSC 模式以验证时钟 ---
+    // // 这会立即尝试启动 TCXO。如果失败，Device Errors 会置位。
+    // check_status(sx126x_set_standby(&hal_ctx, SX126X_STANDBY_CFG_XOSC), "Set Standby XOSC");
+
+    // --- 3. 清除启动时的瞬态错误 ---
+    // sx126x_clear_device_errors(&hal_ctx);
+
+    // --- 3. 现在检查错误 (应该是 0x0000) ---
+    // sx126x_errors_mask_t device_errors;
+    // sx126x_get_device_errors(&hal_ctx, &device_errors);
+    // printf("Device Errors: 0x%04X\n", device_errors);
+
+    // // Check Status again to see if it cleared
+    // sx126x_get_status(&hal_ctx, &chip_status);
+    // printf("Chip Status after Init: CmdStatus=%d, ChipMode=%d\n", chip_status.cmd_status, chip_status.chip_mode);
+    // if (device_errors & SX126X_ERRORS_RC64K_CALIBRATION) printf("  - RC64K Calibration Failed\n");
+    // if (device_errors & SX126X_ERRORS_RC13M_CALIBRATION) printf("  - RC13M Calibration Failed\n");
+    // if (device_errors & SX126X_ERRORS_PLL_CALIBRATION)   printf("  - PLL Calibration Failed\n");
+    // if (device_errors & SX126X_ERRORS_ADC_CALIBRATION)   printf("  - ADC Calibration Failed\n");
+    // if (device_errors & SX126X_ERRORS_IMG_CALIBRATION)   printf("  - Image Calibration Failed\n");
+    // if (device_errors & SX126X_ERRORS_XOSC_START)  printf("  - XOSC Failed to Start\n");
+    // if (device_errors & SX126X_ERRORS_PLL_LOCK)    printf("  - PLL Lock Failed\n");
+    // if (device_errors & SX126X_ERRORS_PA_RAMP)     printf("  - PA Ramp Failed\n");
+
+    sx126x_cfg_tx_clamp(&hal_ctx);
 
     // 6. Set PA Config
     sx126x_pa_cfg_params_t pa_params;
@@ -135,11 +147,12 @@ int main(int argc, char *argv[]) {
     pa_params.pa_lut        = 0x01;
     check_status(sx126x_set_pa_cfg(&hal_ctx, &pa_params), "Set PA Config");
 
+
     // 7. Set TX Params (Keep it for reference, though we are doing RX)
-    check_status(sx126x_set_tx_params(&hal_ctx, TX_OUTPUT_POWER, SX126X_RAMP_200_US), "Set TX Params");
+    check_status(sx126x_set_tx_params(&hal_ctx, TX_OUTPUT_POWER, SX126X_RAMP_40_US), "Set TX Params");
 
     // 8. Set Buffer Base Address
-    check_status(sx126x_set_buffer_base_address(&hal_ctx, 0x00, 0x00), "Set Buffer Base Address");
+    // check_status(sx126x_set_buffer_base_address(&hal_ctx, 0x00, 0x00), "Set Buffer Base Address");
 
     // 9. Set Modulation Params (LoRa)
     sx126x_mod_params_lora_t mod_params;
@@ -147,20 +160,33 @@ int main(int argc, char *argv[]) {
     mod_params.bw = SX126X_LORA_BW_125;
     mod_params.cr = SX126X_LORA_CR_4_5;
     mod_params.ldro = 0; 
-
     check_status(sx126x_set_lora_mod_params(&hal_ctx, &mod_params), "Set Modulation Params");
+
+
+    // TX Configuration 
+    sx126x_pkt_params_lora_t tx_pkt_params;
+    tx_pkt_params.preamble_len_in_symb = 8; 
+    tx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
+    tx_pkt_params.pld_len_in_bytes = 0; 
+    tx_pkt_params.crc_is_on = true;      
+    tx_pkt_params.invert_iq_is_on = false; // Standard IQ for Uplink
+    check_status(sx126x_set_lora_pkt_params(&hal_ctx, &tx_pkt_params), "Set TX Packet Params");
+
 
     // --- COMMON CONFIGURATION ---
     // Set Sync Word (Public)
     check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
 
-    // Set Frequency (Ensure it's 915MHz)
-    printf("Setting Frequency to 915MHz via Command...\n");
-    check_status(sx126x_set_rf_freq(&hal_ctx, 915000000), "Set RF Frequency (915MHz)");
+    // Set IRQ for TX
+    check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT | SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+                                            SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT | SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+                                            SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
+
+    sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
 
     // --- Calibrate Image (Important for Frequency Setting) ---
     // For 915MHz (Band 902-928), we use freq 902 & 928
-    check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
+    // check_status(sx126x_cal_img(&hal_ctx, 0xE1, 0xE9), "Calibrate Image (902-928MHz)");
 
     // Check Status immediately
     sx126x_get_status(&hal_ctx, &chip_status);
@@ -169,13 +195,15 @@ int main(int argc, char *argv[]) {
     if (mode == 1) {
         printf("--- PHASE 1: TX Mode (Continuous) ---\n");
 
-        // Manual RF Switch Control for TX
-        printf("Setting RF_SW (GPIO %d) to LOW for TX...\n", hal_ctx.rf_sw_gpio);
-        gpio_set_value(hal_ctx.rf_sw_gpio, 0);
+        // RF 开关：DIO2 自动 + 外部 RF_SW GPIO 双重控制
+        printf("RF switch: DIO2 auto + GPIO %d LOW for TX.\n", hal_ctx.rf_sw_gpio);
+        if (hal_ctx.rf_sw_gpio >= 0) {
+            gpio_set_value(hal_ctx.rf_sw_gpio, 0); // 低电平 = 发射
+        }
 
         // TX Configuration
         sx126x_pkt_params_lora_t tx_pkt_params;
-        tx_pkt_params.preamble_len_in_symb = 12; 
+        tx_pkt_params.preamble_len_in_symb = 8; 
         tx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
         tx_pkt_params.pld_len_in_bytes = 64; 
         tx_pkt_params.crc_is_on = true;      
@@ -228,42 +256,41 @@ int main(int argc, char *argv[]) {
         // --- PHASE 2: RX (Continuous) ---
         printf("\n--- PHASE 2: Entering RX Mode ---\n");
 
-        // Manual RF Switch Control for RX
-        // Assuming High = TX, Low = RX (Common for PE4259 etc.)
-        // Since TX worked with High, let's try Low for RX.
-        printf("Setting RF_SW (GPIO %d) to HIGH for RX...\n", hal_ctx.rf_sw_gpio);
-        gpio_set_value(hal_ctx.rf_sw_gpio, 1);
-
-        // RX Configuration
-        sx126x_pkt_params_lora_t rx_pkt_params;
-        rx_pkt_params.preamble_len_in_symb = 12; // Match TX
-        rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
-        rx_pkt_params.pld_len_in_bytes = 64; // Match TX
-        rx_pkt_params.crc_is_on = true;      // Match TX
-        rx_pkt_params.invert_iq_is_on = false; // Match TX
-        check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
-
-        // Set IRQ for RX
-        check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
-                                               SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
-                                               SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
-
-        // --- NEW: Set Sync Word back to Public (0x34) ---
-        // Most Gateways use Public Network.
-        check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
-
-        // Check for errors one last time before starting
-        sx126x_get_device_errors(&hal_ctx, &device_errors);
-        if (device_errors != 0) {
-            printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
-            sx126x_clear_device_errors(&hal_ctx);
+        // RF 开关：DIO2 自动 + 外部 RF_SW GPIO 双重控制
+        printf("RF switch: DIO2 auto + GPIO %d HIGH for RX.\n", hal_ctx.rf_sw_gpio);
+        if (hal_ctx.rf_sw_gpio >= 0) {
+            gpio_set_value(hal_ctx.rf_sw_gpio, 1); // 高电平 = 接收
         }
 
-        // Set initial frequency
-        // 902300000
-        int freq = RF_FREQUENCY;
-        sx126x_set_rf_freq(&hal_ctx, freq);
-        sx126x_set_rx(&hal_ctx, 0);
+        // // RX Configuration
+        // sx126x_pkt_params_lora_t rx_pkt_params;
+        // rx_pkt_params.preamble_len_in_symb = 8; // Match TX
+        // rx_pkt_params.header_type = SX126X_LORA_PKT_EXPLICIT;
+        // rx_pkt_params.pld_len_in_bytes = 0; // Match TX
+        // rx_pkt_params.crc_is_on = true;      // Match TX
+        // rx_pkt_params.invert_iq_is_on = false; // Match TX
+        // check_status(sx126x_set_lora_pkt_params(&hal_ctx, &rx_pkt_params), "Set RX Packet Params");
+
+        // // Set IRQ for RX
+        // check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+        //                                        SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
+        //                                        SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set RX IRQ");
+
+        // // --- NEW: Set Sync Word back to Public (0x34) ---
+        // // Most Gateways use Public Network.
+        // check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
+
+        // // Check for errors one last time before starting
+        // sx126x_get_device_errors(&hal_ctx, &device_errors);
+        // if (device_errors != 0) {
+        //     printf("WARNING: Device Errors before RX: 0x%04X\n", device_errors);
+        //     sx126x_clear_device_errors(&hal_ctx);
+        // }
+
+
+        // 清掉可能残留的中断标志，进入连续接收
+        sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
+        // sx126x_set_rx_with_timeout_in_rtc_step(&hal_ctx, SX126X_RX_CONTINUOUS);
 
         // Start RX
         // SX126X_RX_CONTINUOUS is 0xFFFFFF
@@ -273,15 +300,29 @@ int main(int argc, char *argv[]) {
         // To be safe for continuous RX, we should use a large value or 0 if we restart manually.
         // Let's try 0 (Single mode, wait forever) and restart in loop.
 
+        sx126x_set_rx(&hal_ctx, 0xFFFFFF); // 0 = wait forever
+
         int loop_cnt = 0;
         while (1) {
+            // Check BUSY pin with timeout
+            int busy_timeout = 1000; // 1 second
+            while (busy_timeout > 0) {
+                int busy_val = gpio_get_value(hal_ctx.busy_gpio);
+                if (busy_val == 0) break;
+                usleep(1000);
+                busy_timeout--;
+            }
+            if (busy_timeout == 0) {
+                printf("WARNING: BUSY pin stuck HIGH! Radio might be unresponsive.\n");
+            }
+
             uint16_t irq_status = 0;
             sx126x_get_irq_status(&hal_ctx, &irq_status);
 
             // DEBUG: Print IRQ Status periodically
-            if (loop_cnt % 10 == 0) {
-                // printf("[RX Loop] IRQ: 0x%04X\n", irq_status);
-            }
+            // if (loop_cnt % 100 == 0) {
+            //     printf("[RX Loop] IRQ: 0x%04X\n", irq_status);
+            // }
 
             if (irq_status & SX126X_IRQ_RX_DONE) {
                 printf("\nPacket Received!\n");
@@ -310,12 +351,15 @@ int main(int argc, char *argv[]) {
                 // Clear IRQ
                 sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
 
-                // Restart Rx
-                sx126x_set_rx(&hal_ctx, 0);
+                // Restart Rx (continuous)
+                sx126x_set_rx(&hal_ctx, 0xFFFFF);
             }
             else if (irq_status & SX126X_IRQ_PREAMBLE_DETECTED) {
                 printf("Preamble Detected!\n");
                 sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_PREAMBLE_DETECTED);
+
+                // Restart Rx (continuous)
+                sx126x_set_rx(&hal_ctx, 0xFFFFFF);
             }
             else if (irq_status & SX126X_IRQ_HEADER_VALID) {
                 printf("Header Valid!\n");
@@ -324,11 +368,12 @@ int main(int argc, char *argv[]) {
             else if (irq_status & SX126X_IRQ_CRC_ERROR) {
                 printf("CRC Error!\n");
                 sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-                sx126x_set_rx(&hal_ctx, 0);
+                sx126x_set_rx(&hal_ctx, 0xFFFFFF);
             }
             else if (irq_status & SX126X_IRQ_TIMEOUT) {
+                printf("Time out!\n");
                 sx126x_clear_irq_status(&hal_ctx, SX126X_IRQ_ALL);
-                sx126x_set_rx(&hal_ctx, 0);
+                sx126x_set_rx(&hal_ctx, 0xFFFFFF);
             }
 
             loop_cnt++;

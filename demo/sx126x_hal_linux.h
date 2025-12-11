@@ -21,5 +21,6 @@ void sx126x_hal_linux_cleanup(sx126x_hal_context_t *ctx);
 
 // Helper to control GPIO manually
 int gpio_set_value(int gpio, int value);
+int gpio_get_value(int gpio);
 
 #endif // SX126X_HAL_LINUX_H

@@ -46,7 +46,7 @@ int gpio_set_value(int gpio, int value) {
     return 0;
 }
 
-static int gpio_get_value(int gpio) {
+int gpio_get_value(int gpio) {
     char buffer[64];
     char value_str[3];
     snprintf(buffer, sizeof(buffer), "/sys/class/gpio/gpio%d/value", gpio);
@@ -183,9 +183,11 @@ sx126x_hal_status_t sx126x_hal_write( const void* context, const uint8_t* comman
     }
 
     // DEBUG: Print Write Response (Status)
+#ifdef DEBUG
     printf("SPI Write (Cmd=0x%02X, Len=%d): ", command[0], command_length + data_length);
     for(int i=0; i<command_length + data_length; i++) printf("%02X ", rx_buffer[i]);
     printf("\n");
+#endif
 
     free(tx_buffer);
     free(rx_buffer);
@@ -238,9 +240,11 @@ sx126x_hal_status_t sx126x_hal_read( const void* context, const uint8_t* command
     }
 
     // DEBUG: Print RX Buffer
+#ifdef DEBUG
     printf("SPI Read (CmdLen=%d, DataLen=%d): ", command_length, data_length);
     for(int i=0; i<total_len; i++) printf("%02X ", rx_buffer[i]);
     printf("\n");
+#endif
 
     // Copy the data part to the user buffer
     if (data_length > 0) {
