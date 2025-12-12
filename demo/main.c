@@ -45,11 +45,16 @@ int main(int argc, char *argv[]) {
     }
 
     int mode = 0; // 1=TX, 2=RX
+    int total_sum = 0xfffffff;
     if (strcmp(argv[1], "tx") == 0) mode = 1;
     else if (strcmp(argv[1], "rx") == 0) mode = 2;
     else {
         printf("Invalid mode. Use 'tx' or 'rx'.\n");
         return 1;
+    }
+
+    if (argc >= 3) {
+        total_sum = atoi(argv[2]);
     }
 
     printf("Starting SX126x LoRa Demo in %s mode...\n", mode == 1 ? "TX" : "RX");
@@ -215,11 +220,18 @@ int main(int argc, char *argv[]) {
                                                SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT,
                                                SX126X_IRQ_NONE, SX126X_IRQ_NONE), "Set TX IRQ");
 
-        printf("Starting Continuous TX Loop...\n");
+        printf("\nStarting Continuous TX Loop...\n");
+        if (total_sum != 0xfffffff) {
+            printf("Will send total %d packets.\n", total_sum);
+        } else {
+            printf("Will send packets continuously.\n");
+        }
+
         int i = 0;
+        int sent_packets = 0;
         while (1) {
             i++;
-            printf("Sending Packet %d... ", i);
+            printf("\nSending Packet %d... ", i);
 
             uint8_t tx_buffer[64];
             memset(tx_buffer, 0xAA, sizeof(tx_buffer)); 
@@ -238,6 +250,11 @@ int main(int argc, char *argv[]) {
                 if (irq_status & SX126X_IRQ_TX_DONE) {
                     printf("TX DONE!\n");
                     tx_done = true;
+
+                    if (++sent_packets >= total_sum) {
+                        printf("\nSent total %d packets. Exiting.\n", sent_packets);
+                        goto end;
+                    }
                     break;
                 }
                 if (irq_status & SX126X_IRQ_TIMEOUT) {
@@ -290,8 +307,14 @@ int main(int argc, char *argv[]) {
         // Let's try 0 (Single mode, wait forever) and restart in loop.
 
         // sx126x_set_rx(&hal_ctx, 0xFFFFFF); // 0 = wait forever
+        if (total_sum != 0xfffffff) {
+            printf("Will receive total %d packets.\n", total_sum);
+        } else {
+            printf("Will receive packets continuously.\n");
+        }
 
         int loop_cnt = 0;
+        int received_packets = 0;
         while (1) {
             // Check BUSY pin with timeout
             int busy_timeout = 1000; // 1 second
@@ -314,7 +337,7 @@ int main(int argc, char *argv[]) {
             // }
 
             if (irq_status & SX126X_IRQ_RX_DONE) {
-                printf("\nPacket Received!\n");
+                printf("\nPacket %d Received!\n", received_packets + 1);
 
                 // Get payload length and pointer
                 sx126x_rx_buffer_status_t rx_status;
@@ -342,6 +365,11 @@ int main(int argc, char *argv[]) {
 
                 // Restart Rx (continuous)
                 sx126x_set_rx(&hal_ctx, 0xFFFFF);
+
+                if (++received_packets >= total_sum) {
+                    printf("\nReceived total %d packets. Exiting.\n", received_packets);
+                    break;
+                }
             }
             else if (irq_status & SX126X_IRQ_PREAMBLE_DETECTED) {
                 printf("Preamble Detected!\n");
@@ -375,6 +403,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+end:
     sx126x_hal_linux_cleanup(&hal_ctx);
     return 0;
 }
