@@ -18,7 +18,7 @@
 // ---------------------
 
 #define RF_FREQUENCY 915000000 // 915 MHz (For Wio-SX1262 High Band)
-#define TX_OUTPUT_POWER 20     // dBm (Max Power for SX1262)
+#define TX_OUTPUT_POWER 22     // dBm (Max Power for SX1262)
 
 sx126x_hal_context_t hal_ctx = {
     .spidev_path = SPI_DEV_PATH,
