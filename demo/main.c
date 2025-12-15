@@ -180,7 +180,10 @@ int main(int argc, char *argv[]) {
 
     // --- COMMON CONFIGURATION ---
     // Set Sync Word (Public)
-    check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
+    // check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x34), "Set Sync Word (Public)");
+
+    // Set Sync Word (Private)
+    check_status(sx126x_set_lora_sync_word(&hal_ctx, 0x12), "Set Sync Word (Private)");
 
     // Set IRQ for TX
     check_status(sx126x_set_dio_irq_params(&hal_ctx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT | SX126X_IRQ_RX_DONE | SX126X_IRQ_CRC_ERROR | SX126X_IRQ_TIMEOUT | SX126X_IRQ_PREAMBLE_DETECTED | SX126X_IRQ_HEADER_VALID,
