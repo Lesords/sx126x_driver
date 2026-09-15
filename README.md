@@ -59,3 +59,8 @@ By default, LR-FHSS and BPSK are not included in the build of the driver. It can
 set(SX126X_ENABLE_BPSK ON CACHE BOOL "") # To enable BPSK
 set(SX126X_ENABLE_LR_FHSS ON CACHE BOOL "") # To enable LR-FHSS
 ```
+
+## Demo / 定频测试工具
+
+AM62L 上的定频收发/认证测试工具见 `demo/`，用法与测试用例文档：[FIXED_FREQ_TEST.md](FIXED_FREQ_TEST.md)
+
