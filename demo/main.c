@@ -111,7 +111,8 @@ static uint32_t lora_airtime_ms( uint8_t sf, uint32_t bw_khz, uint8_t cr_denom, 
     const int num = 8 * plen - 4 * sf + 28 + 16 * crc - 20 * ih;
     const int den = 4 * ( sf - 2 * de );
     const int ceil_num_den = ( num > 0 ) ? ( ( num + den - 1 ) / den ) : 0;
-    const double n_payload = 8.0 + ( double ) ( ceil_num_den * ( cr_denom + 4 ) );
+    // 编码率因子 = CR+4：CR 为 1..4（对应 4/5..4/8），恰等于 cr_denom
+    const double n_payload = 8.0 + ( double ) ( ceil_num_den * cr_denom );
 
     return ( uint32_t ) ( ( ( double ) preamble_symb + 4.25 ) * tsym_ms + n_payload * tsym_ms + 0.5 );
 }
